@@ -1,9 +1,12 @@
 // pi-tmp: points Pi's temporary directory (TMPDIR, and so `os.tmpdir()`) at a private directory on disk,
-// `/var/tmp/pi-<user>`, instead of a RAM-backed /tmp (tmpfs with a per-user quota). Pi's bash output files, the
+// `/var/tmp/pi-${USER}`, instead of a RAM-backed /tmp (tmpfs with a per-user quota). Pi's bash output files, the
 // CLIProxyAPI provider's patched-module cache, orche scratch directories and every child process (bash tool commands)
 // then write there. Uses only Node builtins.
 //
-// `PI_TMP_DIR` (environment) names another directory instead, with the same checks.
+// `PI_TMP_DIR` (environment) names another directory instead, with the same checks. When `USER` is missing, empty or
+// not a plain user name, the OS account name (`os.userInfo()`) is used; when that is unusable too, the extension refuses.
+// Whatever the name, the directory must be owned by the running uid, so a `USER` naming someone else cannot borrow
+// their directory.
 //
 // Timing: the factory sets TMPDIR when this extension loads. Pi loads extensions one after another (module import, then
 // factory), so extensions loaded later see the new directory even in module-level constants: list pi-tmp first in a
@@ -13,10 +16,34 @@ import { accessSync, chmodSync, constants, lstatSync, mkdirSync } from "node:fs"
 import { tmpdir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
 
-/** `/var/tmp/pi-<user>`, the user name reduced to [A-Za-z0-9._-]. */
-export function defaultTempDir(user = userInfo().username) {
-  const safe = String(user).replace(/[^A-Za-z0-9._-]/g, "_") || "user";
-  return join("/var/tmp", `pi-${safe}`);
+/** A plain user name: letters, digits, `_`, `.`, `-`, not starting with `.` or `-`, at most 64 characters. */
+const USER_NAME = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$/;
+
+/** `name` when it is a plain user name, otherwise undefined. @param {unknown} name @returns {string | undefined} */
+function plainUserName(name) {
+  return typeof name === "string" && USER_NAME.test(name) ? name : undefined;
+}
+
+/** The OS account name of the running process, or undefined when it cannot be read. */
+function osUserName() {
+  try {
+    return userInfo().username;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * `<baseDir>/pi-${USER}` (base `/var/tmp`). `USER` must be a plain user name; when it is missing, empty or anything else
+ * (`..`, `/`, spaces, ...) the OS account name is used instead, and when that is not a plain user name either this
+ * throws.
+ * @param {{ env?: Record<string, string | undefined>, baseDir?: string, osUser?: () => string | undefined }} [options]
+ */
+export function defaultTempDir(options = {}) {
+  const env = options.env ?? process.env;
+  const user = plainUserName(env.USER) ?? plainUserName((options.osUser ?? osUserName)());
+  if (!user) throw new Error("neither USER nor the OS account name is a plain user name");
+  return join(options.baseDir ?? "/var/tmp", `pi-${user}`);
 }
 
 /**
@@ -43,19 +70,21 @@ export function preparePrivateDir(dir, options = {}) {
 }
 
 /**
- * @param {{ dir?: string, env?: Record<string, string | undefined>, platform?: string, uid?: number }} [options]
+ * @param {{ dir?: string, baseDir?: string, env?: Record<string, string | undefined>, osUser?: () => string | undefined, platform?: string, uid?: number }} [options]
  */
 export function createTmpExtension(options = {}) {
   const platform = options.platform ?? process.platform;
   const env = options.env ?? process.env;
   return function piTmp(_pi) {
     if (platform === "win32") return;
-    const dir = options.dir ?? (env.PI_TMP_DIR ? resolve(env.PI_TMP_DIR) : defaultTempDir());
+    let dir = options.dir ?? env.PI_TMP_DIR;
     try {
+      dir = dir ? resolve(dir) : defaultTempDir({ env, baseDir: options.baseDir, osUser: options.osUser });
       preparePrivateDir(dir, { uid: options.uid });
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      throw new Error(`pi-tmp: cannot use ${dir} as the temporary directory (${reason}); keeping ${env.TMPDIR || tmpdir()}`);
+      const what = dir ? `${dir} as the temporary directory` : "a temporary directory";
+      throw new Error(`pi-tmp: cannot use ${what} (${reason}); keeping ${env.TMPDIR || tmpdir()}`);
     }
     env.TMPDIR = dir;
   };

@@ -9,10 +9,26 @@ const root = mkdtempSync(join(tmpdir(), "pi-tmp-test-"));
 after(() => rmSync(root, { recursive: true, force: true }));
 const mode = (path) => statSync(path).mode & 0o777;
 
-test("defaultTempDir is /var/tmp/pi-<user> with a sanitized user name", () => {
-  assert.equal(defaultTempDir("arthur"), "/var/tmp/pi-arthur");
-  assert.equal(defaultTempDir("a/../b c"), "/var/tmp/pi-a_.._b_c");
+test("defaultTempDir is /var/tmp/pi-${USER}", () => {
+  const noOsUser = () => undefined;
+  assert.equal(defaultTempDir({ env: { USER: "arthur" }, osUser: noOsUser }), "/var/tmp/pi-arthur");
+  assert.equal(defaultTempDir({ env: { USER: "alice" }, osUser: () => "arthur" }), "/var/tmp/pi-alice", "USER wins over the OS account");
+  assert.equal(defaultTempDir({ env: { USER: "svc_ci-2.x" }, osUser: noOsUser }), "/var/tmp/pi-svc_ci-2.x");
+  assert.equal(defaultTempDir({ env: { USER: "bob" }, baseDir: "/base" }), "/base/pi-bob");
   assert.equal(typeof piTmp, "function");
+});
+
+test("defaultTempDir falls back to the OS account when USER is missing, empty or not a plain name", () => {
+  const osUser = () => "carol";
+  for (const USER of [undefined, "", "..", ".", "a/../b", "../root", "/etc", "a b", "-rf", ".hidden", "x".repeat(65), "a\nb"]) {
+    assert.equal(defaultTempDir({ env: { USER }, osUser }), "/var/tmp/pi-carol", JSON.stringify(USER));
+  }
+});
+
+test("defaultTempDir refuses when neither USER nor the OS account is a plain name", () => {
+  for (const osUser of [() => undefined, () => "", () => "../x"]) {
+    assert.throws(() => defaultTempDir({ env: { USER: "a/b" }, osUser }), /neither USER nor the OS account name/);
+  }
 });
 
 test("preparePrivateDir creates a missing directory with mode 0700", () => {
@@ -84,6 +100,35 @@ test("the extension fails clearly and keeps TMPDIR when the directory is unusabl
   const env = { TMPDIR: "/tmp" };
   assert.throws(() => createTmpExtension({ dir: file, env })({}), /pi-tmp: cannot use .*not a directory.*keeping \/tmp/);
   assert.equal(env.TMPDIR, "/tmp");
+});
+
+test("by default the extension uses <base>/pi-${USER} of its environment", () => {
+  const env = { TMPDIR: "/tmp", USER: "alice" };
+  createTmpExtension({ env, baseDir: root, osUser: () => "arthur" })({});
+  assert.equal(env.TMPDIR, join(root, "pi-alice"));
+  assert.equal(mode(join(root, "pi-alice")), 0o700);
+  assert.equal(existsSync(join(root, "pi-arthur")), false);
+
+  const fallback = { TMPDIR: "/tmp", USER: "../escape" };
+  createTmpExtension({ env: fallback, baseDir: root, osUser: () => "carol" })({});
+  assert.equal(fallback.TMPDIR, join(root, "pi-carol"));
+  assert.equal(existsSync(join(root, "..", "escape")), false);
+});
+
+test("the extension refuses without a usable user name and keeps TMPDIR", () => {
+  const env = { TMPDIR: "/tmp", USER: "" };
+  assert.throws(() => createTmpExtension({ env, baseDir: root, osUser: () => undefined })({}),
+    /pi-tmp: cannot use a temporary directory \(neither USER nor the OS account name.*keeping \/tmp/);
+  assert.equal(env.TMPDIR, "/tmp");
+});
+
+test("a USER naming another user's existing directory is refused, not borrowed", () => {
+  const other = join(root, "pi-mallory");
+  mkdirSync(other, { mode: 0o755 });
+  const env = { TMPDIR: "/tmp", USER: "mallory" };
+  assert.throws(() => createTmpExtension({ env, baseDir: root, uid: process.getuid() + 1 })({}), /owned by uid/);
+  assert.equal(env.TMPDIR, "/tmp");
+  assert.equal(mode(other), 0o755, "the other directory is not chmodded");
 });
 
 test("the extension does nothing on Windows", () => {
