@@ -94,6 +94,15 @@ test("PI_TMP_DIR names the directory (resolved), with the same checks", () => {
   assert.equal(refused.TMPDIR, "/tmp");
 });
 
+test("PI_TMP_DIR wins without consulting USER or the OS account", () => {
+  const dir = join(root, "override");
+  const env = { TMPDIR: "/tmp", USER: "../bad", PI_TMP_DIR: dir };
+  const osUser = () => { throw new Error("the OS account must not be read"); };
+  createTmpExtension({ env, baseDir: root, osUser })({});
+  assert.equal(env.TMPDIR, dir);
+  assert.equal(mode(dir), 0o700);
+});
+
 test("the extension fails clearly and keeps TMPDIR when the directory is unusable", () => {
   const file = join(root, "not-a-dir");
   writeFileSync(file, "");
