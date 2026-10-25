@@ -1,0 +1,13 @@
+{
+  "name": "pi-tmp",
+  "version": "0.1.0",
+  "description": "Points Pi's temporary directory (TMPDIR) at a private on-disk directory instead of a RAM-backed /tmp",
+  "type": "module",
+  "keywords": ["pi-package", "pi-extension", "tmpdir", "tmpfs"],
+  "files": ["index.js", "README.md"],
+  "pi": { "extensions": ["./index.js"] },
+  "scripts": {
+    "test": "node --test 'test/*.test.mjs'"
+  },
+  "engines": { "node": ">=22.19.0" }
+}
